@@ -1,263 +1,205 @@
 package textbox
 
 import (
+	"bytes"
 	"errors"
-	"fmt"
-	"image"
-	"os"
-	"reflect"
 	"unicode/utf8"
-
-	"golang.org/x/sys/unix"
 )
 
+// Point is a 2d coordinate
+type Point struct {
+	X, Y int
+}
+
+// Rect defines a rectangle in a 2d-plane by its position and size
 type Rect struct {
-	P      image.Point
+	Origin Point
 	Width  int
 	Height int
 }
 
+// Textbox is a canvas of runes of a defined dimension
 type Textbox struct {
 	canvas [][]rune
 	pixels []rune
 	width  int
 	height int
-	cursor image.Point
+	cursor int
 }
 
+// NewTextbox returns a textbox with dimentions widht and height
 func NewTextbox(width, height int) *Textbox {
-	t := new(Textbox)
-	t.width = width
-	t.height = height
-	t.canvas = make([][]rune, height)
-	t.pixels = make([]rune, width*height)
-	for i := range t.canvas {
-		start_index := i * width
-		t.canvas[i] = t.pixels[start_index : start_index+width]
+	tb := new(Textbox)
+	tb.width = int(abs(int64(width)))
+	tb.height = int(abs(int64(height)))
+	tb.canvas = make([][]rune, height)
+	tb.pixels = make([]rune, width*height)
+
+	index := 0
+	for i := range tb.canvas {
+		tb.canvas[i] = tb.pixels[index : index+width]
+		index += width
 	}
-	t.cursor.X, t.cursor.Y = 0, 0
-	return t
+	return tb
 }
 
-func BoxOfStrings(strs ...string) *Textbox {
+// FromStrings creates a new textbox exactly large enough to contain strs
+func FromStrings(strs ...string) *Textbox {
 	width, height := 0, len(strs)
 	for _, s := range strs {
-		width = maxInt(len(s), width)
+		if len(s) > width {
+			width = len(s)
+		}
 	}
-	t := NewTextbox(width, height)
+	tb := NewTextbox(width, height)
 	for i, s := range strs {
-		copy(t.canvas[i], []rune(s))
+		copy(tb.canvas[i], []rune(s))
 	}
-	return t
+	return tb
 }
 
-func (t *Textbox) Runes() []rune {
-	runes := make([]rune, len(t.pixels))
-	copy(runes, t.pixels)
+// Runes returns the contents of the textbox as a slice of runes
+func (tb *Textbox) Runes() []rune {
+	runes := make([]rune, len(tb.pixels))
+	copy(runes, tb.pixels)
 	return runes
 }
 
-func (t *Textbox) String() string {
-	b := make([]byte, t.width*t.height+t.height)
-	for i := range t.canvas {
-		copy(b[t.width*i:], string(t.canvas[i]))
-		b[t.width*(i+1)-1] = '\n'
+// String returns the contents of the textbox as a string
+func (tb *Textbox) String() string {
+	buf := new(bytes.Buffer)
+	for i := range tb.canvas {
+		buf.WriteString(string(tb.canvas[i]))
+		buf.WriteByte('\n')
 	}
-	return string(b)
+	return buf.String()
 }
 
-func (t *Textbox) Bytes() []byte {
-	return []byte(string(t.pixels))
+// Bytes returns the contense of the textbox as a []byte
+func (tb *Textbox) Bytes() []byte {
+	return []byte(string(tb.pixels))
 }
 
-func (t *Textbox) Size() (width, height int) {
-	return t.width, t.height
+// Size returns the textbox dimensions
+func (tb *Textbox) Size() (width, height int) {
+	return tb.width, tb.height
 }
 
-func (t *Textbox) Runway() int {
-	return cap(t.pixels) - (t.width * t.cursor.Y) - t.cursor.X
+// Cursor returns the current cursor location
+func (tb *Textbox) Cursor() (x, y int) {
+	return tb.cursor % len(tb.canvas[0]), tb.cursor / len(tb.canvas[0])
 }
 
-func (t *Textbox) Cursor() image.Point {
-	return t.cursor
-}
+// SetCursor moves the cursor to the x, y location
+func (tb *Textbox) SetCursor(x, y int) error {
 
-func (t *Textbox) SetCursor(p image.Point) error {
-	// Test bounds
-	if p.X < 0 || p.X > t.width {
-		return errors.New("image.Point out of bounds.")
-	}
-	if p.Y < 0 || p.Y > t.height {
-		return errors.New("image.Point out of bounds.")
+	if x < 0 || x > tb.width ||
+		y < 0 || y > tb.height {
+		return errors.New("location out of bounds")
 	}
 
-	t.cursor = p
+	tb.cursor = (y * len(tb.canvas[0])) + x
 	return nil
 }
 
-func (t *Textbox) incrementCursor() {
-	if t.cursor.X < t.width-1 {
-		t.cursor.X++
-	} else {
-		t.cursor.X = 0
-		t.cursor.Y++
-	}
+func (tb *Textbox) Write(b []byte) (int, error) {
+	return tb.WriteRunes(bytes.Runes(b))
 }
 
-func (t *Textbox) decrementCursor() {
-	if t.cursor.X > 0 {
-		t.cursor.X--
-	} else {
-		t.cursor.Y--
-		t.cursor.X = t.width - 1
+// WriteRunes writes r into the textbox at the cursor location
+func (tb *Textbox) WriteRunes(r []rune) (int, error) {
+	if tb.cursor >= len(tb.pixels) {
+		return 0, errors.New("textbox full")
 	}
+
+	n := copy(tb.pixels[tb.cursor:], r)
+	tb.cursor += n
+	return n, nil
 }
 
-func (t *Textbox) Write(i interface{}) (int, error) {
-	var runes []rune
-
-	switch i := i.(type) {
-	case *Textbox:
-		return t.Draw(i, t.cursor)
-
-	case []byte:
-		runes = []rune(string(i))
-
-	case []rune:
-		runes = i
-
-	case string:
-		runes = []rune(i)
-
-	case fmt.Stringer:
-		runes = []rune(i.String())
-
-	default:
-		return 0, fmt.Errorf("Textbox can not write type %s. Convert to string", reflect.TypeOf(i))
-	}
-
-	return t.writeRunes(runes)
+// WriteString writes s into the textbox at the cursor location
+func (tb *Textbox) WriteString(s string) (int, error) {
+	return tb.WriteRunes([]rune(s))
 }
 
-func (t *Textbox) writeRunes(r []rune) (int, error) {
-	count := 0
-	freeSpace := t.Runway()
-	if freeSpace == 0 {
-		return count, errors.New("Textbox full.")
-	}
-
-	for ; count < minInt(freeSpace, len(r)); count++ {
-		if r[count] != 0 {
-			t.canvas[t.cursor.Y][t.cursor.X] = r[count]
-		}
-		t.incrementCursor()
-	}
-	return count, nil
-}
-
-func (t *Textbox) WriteWords(w ...string) (int, error) {
-	count := 0
-	freeSpace := t.Runway()
-	if freeSpace == 0 {
-		return count, errors.New("Textbox full.")
-	}
-
-	return count, nil
-}
-
-func (t *Textbox) Draw(tb *Textbox, p image.Point) (int, error) {
+// Draw tbox into tb at the offset given by p
+func (tb *Textbox) Draw(tbox *Textbox, p Point, transparents []rune) (int, error) {
 	count := 0
 	// check for complete out if bounds
-	if tb.width+p.X <= 0 || tb.height+p.Y <= 0 {
+	if tbox.width+p.X <= 0 || tbox.height+p.Y <= 0 {
 		return count, nil
 	}
 
 	// set crop point on foreground textbox
-	cropPoint := image.Point{0, 0}
+	cropPoint := Point{0, 0}
 	if p.X < 0 {
-		cropPoint.X = absInt(p.X)
+		cropPoint.X = int(abs(int64(p.X)))
 		p.X = 0
 	}
 	if p.Y < 0 {
-		cropPoint.Y = absInt(p.Y)
+		cropPoint.Y = int(abs(int64(p.Y)))
 		p.Y = 0
 	}
 
 	// draw foreground textbox (tb) into background textbox (t)
 	xIndex := p.X
-	for i := range tb.canvas[cropPoint.Y:] {
-		yIndex := p.Y + i
-		if yIndex >= t.height {
-			break
+	if transparents == nil {
+		// without transparency
+		for i := range tbox.canvas[cropPoint.Y:] {
+			yIndex := p.Y + i
+			if yIndex >= tb.height {
+				break
+			}
+			count += copy(tb.canvas[yIndex][xIndex:], tbox.canvas[cropPoint.Y+i][cropPoint.X:])
+		}
+	} else {
+		// with transparency
+		invisible := make(map[rune]bool)
+		for _, r := range transparents {
+			invisible[r] = true
 		}
 
-		count += copy(t.canvas[yIndex][xIndex:], tb.canvas[cropPoint.Y+i][cropPoint.X:])
-	}
-
-	// set cursor
-	t.SetCursor(image.Point{minInt(xIndex+tb.width-cropPoint.X-1, t.width-1), minInt(p.Y+tb.height-cropPoint.Y-1, t.height-1)})
-	t.incrementCursor()
-
-	return count, nil
-}
-
-func (t *Textbox) DrawWithTransparency(tb *Textbox, p image.Point, transparentChar rune) (int, error) {
-	count := 0
-	// check for complete out if bounds
-	if tb.width+p.X <= 0 || tb.height+p.Y <= 0 {
-		return count, nil
-	}
-
-	// set crop point on foreground textbox
-	cropPoint := image.Point{0, 0}
-	if p.X < 0 {
-		cropPoint.X = absInt(p.X)
-		p.X = 0
-	}
-	if p.Y < 0 {
-		cropPoint.Y = absInt(p.Y)
-		p.Y = 0
-	}
-
-	// draw foreground textbox (tb) into background textbox (t)
-	xIndex := p.X
-	for i := range tb.canvas[cropPoint.Y:] {
-		yIndex := p.Y + i
-		if yIndex >= t.height {
-			break
-		}
-
-		for j := range tb.canvas[i][cropPoint.X:] {
-			if xIndex+j >= t.width {
+		for i := range tbox.canvas[cropPoint.Y:] {
+			yIndex := p.Y + i
+			if yIndex >= tb.height {
 				break
 			}
 
-			if tb.canvas[cropPoint.Y+i][cropPoint.X+j] != transparentChar {
-				t.canvas[yIndex][xIndex+j] = tb.canvas[cropPoint.Y+i][cropPoint.X+j]
+			for j := range tbox.canvas[i][cropPoint.X:] {
+				if xIndex+j >= tb.width {
+					break
+				}
+
+				if !invisible[tbox.canvas[cropPoint.Y+i][cropPoint.X+j]] {
+					tb.canvas[yIndex][xIndex+j] = tbox.canvas[cropPoint.Y+i][cropPoint.X+j]
+				}
+				count++
 			}
-			count++
 		}
 	}
 
 	// set cursor
-	t.SetCursor(image.Point{minInt(xIndex+tb.width-cropPoint.X-1, t.width-1), minInt(p.Y+tb.height-cropPoint.Y-1, t.height-1)})
-	t.incrementCursor()
+	tb.SetCursor(
+		min(xIndex+tbox.width-cropPoint.X-1, tb.width-1),
+		min(p.Y+tbox.height-cropPoint.Y-1, tb.height-1))
+	tb.cursor++
 
 	return count, nil
 }
 
-func (t *Textbox) Tile(tb *Textbox) (int, error) {
+// Tile fills tb by drawing adjacent copies of tbox into it
+func (tb *Textbox) Tile(tbox *Textbox, transparents []rune) (int, error) {
 	count := 0
 	var err error
-	p := image.Point{0, 0}
+	p := Point{0, 0}
 	for {
 		start := p
-		n, err := t.Draw(tb, p)
+		n, err := tb.Draw(tbox, p, transparents)
 		count += n
-		if err != nil || t.Runway() == 0 {
+		if err != nil || tb.cursor >= len(tb.pixels) {
 			break
 		}
-		p = t.cursor
+		p.X, p.Y = tb.Cursor()
 		if p.X != 0 {
 			p.Y = start.Y
 		}
@@ -265,107 +207,61 @@ func (t *Textbox) Tile(tb *Textbox) (int, error) {
 	return count, err
 }
 
-func (t *Textbox) Fill(u rune) error {
+// Fill every rune in textbox with 'u'
+func (tb *Textbox) Fill(u rune) error {
 	if !utf8.ValidRune(u) {
-		return errors.New("invalid rune.")
+		return errors.New("invalid rune")
 	}
 
-	for i := range t.pixels {
-		t.pixels[i] = u
+	for i := range tb.pixels {
+		tb.pixels[i] = u
 	}
-
 	return nil
 }
 
-func (t *Textbox) Replace(a, b rune) (int, error) {
-	count := 0
+// Replace all 'a' runes in textbox with 'b'
+func (tb *Textbox) Replace(a, b rune) (int, error) {
 	if !utf8.ValidRune(a) {
-		return count, errors.New("invalid rune.")
+		return 0, errors.New("invalid rune")
 	}
 
-	for i := range t.pixels {
-		if t.pixels[i] == a {
-			t.pixels[i] = b
+	count := 0
+	for i := range tb.pixels {
+		if tb.pixels[i] == a {
+			tb.pixels[i] = b
 			count++
 		}
 	}
 	return count, nil
 }
 
-func (t *Textbox) Crop(r Rect) (*Textbox, error) {
+// Crop returns a new textbox with the contense the crop region
+func (tb *Textbox) Crop(r Rect) (*Textbox, error) {
 	// Check if point is in bounds
-	err := t.SetCursor(r.P)
+	err := tb.SetCursor(r.Origin.X, r.Origin.Y)
 	if err != nil {
 		return nil, err
 	}
+
 	// crop intersection
-	cropWidth := minInt(t.width-r.P.X, r.Width)
-	cropHeight := minInt(t.height-r.P.Y, r.Height)
+	cropWidth := min(tb.width-r.Origin.X, r.Width)
+	cropHeight := min(tb.height-r.Origin.Y, r.Height)
 	crop := NewTextbox(cropWidth, cropHeight)
 	for i := range crop.canvas {
-		copy(crop.canvas[i], t.canvas[r.P.Y+i][r.P.X:cropWidth+r.P.X])
+		copy(crop.canvas[i], tb.canvas[r.Origin.Y+i][r.Origin.X:cropWidth+r.Origin.X])
 	}
 	return crop, err
 }
 
-func (t *Textbox) Copy() *Textbox {
-	tb := NewTextbox(t.width, t.height)
-	copy(tb.pixels, t.pixels)
-	return tb
+// Helper functions
+func abs(n int64) int64 {
+	y := n >> 63
+	return (n ^ y) - y
 }
 
-func TerminalSize() (width, height int, err error) {
-	size, err := unix.IoctlGetWinsize(int(os.Stdin.Fd()), unix.TIOCGWINSZ)
-	if err != nil {
-		return 0, 0, err
+func min(a, b int) int {
+	if a < b {
+		return a
 	}
-	return int(size.Col), int(size.Row), nil
-}
-
-func boundPoint(p image.Point, width, height int) (np, diff image.Point) {
-	x, xd := bound(p.X, 0, width-1)
-	y, yd := bound(p.Y, 0, height-1)
-	np = image.Point{x, y}
-	diff = image.Point{xd, yd}
-	return np, diff
-}
-
-func bound(i, start, end int) (n, diff int) {
-	n = i
-	diff = 0
-	if i < start {
-		diff = start - i
-		n = start
-	} else if n > end {
-		diff = end - i
-		n = end
-	}
-	return n, diff
-}
-
-func absInt(x int) int {
-	if x < 0 {
-		return -1 * x
-	}
-	return x
-}
-
-func maxInt(ints ...int) int {
-	max := ints[0]
-	for _, v := range ints {
-		if v > max {
-			max = v
-		}
-	}
-	return max
-}
-
-func minInt(ints ...int) int {
-	min := ints[0]
-	for _, v := range ints {
-		if v < min {
-			min = v
-		}
-	}
-	return min
+	return b
 }
